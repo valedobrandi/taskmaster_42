@@ -15,9 +15,7 @@ programs:
     workingdir: /tmp
 
   server:
-    uid: 0
-    gid: 0
-    cmd: ["go", "run", "./testprograms/ticker/main.go", "4"]
+    cmd: ["./testprograms/ticker/server.sh"]
     numprocs: 1
     umask: 022
     workingdir: .
@@ -27,7 +25,7 @@ programs:
       - 0
       - 2
     startretries: 3
-    starttime: 5
+    starttime: 2
     stopsignal: TERM
     stoptime: 10
     stdout: /tmp/nginx.stdout

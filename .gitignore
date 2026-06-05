@@ -8,3 +8,4 @@ testprograms/crasher/crasher
 testprograms/longrunner/longrunner
 testprograms/envreporter/envreporter
 testprograms/slowstopper/slowstopper
+go1.23.0.linux-amd64.tar.gz
