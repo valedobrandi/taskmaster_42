@@ -44,14 +44,14 @@ func main() {
 		return
 	}
 
-	go internal.RunMemoryGuard(ctx, memGuardCfg, mgr, logger)
-
 	svr, err := internal.NewServer("/tmp/taskmaster.sock", mgr, path, memGuardCfg, shutdown)
 	if err != nil {
 		logger.LogMessage(internal.LevelError, fmt.Sprintf("failed to create server: %v", err))
 		shutdown()
 		return
 	}
+
+	go internal.RunMemoryGuard(ctx, svr.MemoryGuardCfg(), mgr, logger)
 
 	go func() {
 		if err := svr.Serve(); err != nil {

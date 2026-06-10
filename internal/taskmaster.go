@@ -1,12 +1,12 @@
 package internal
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,11 +46,21 @@ type UpdateTracker struct {
 }
 
 type processInfo struct {
-	ctx         context.Context
-	spec        *Config
-	tracker     *UpdateTracker
-	stopSignal  os.Signal
-	stopTimeout time.Duration
+	runtime *Runtime
+	spec    *atomic.Pointer[Config]
+	tracker *UpdateTracker
+}
+
+func (p *processInfo) currentSpec() *Config {
+	return p.spec.Load()
+}
+
+func (p *processInfo) stopSignal() os.Signal {
+	return getStopSignal(p.currentSpec().Stopsignal)
+}
+
+func (p *processInfo) stopTimeout() time.Duration {
+	return time.Duration(p.currentSpec().Stoptime) * time.Second
 }
 
 func (t *UpdateTracker) Emit(status Status, pid int, exitCode int) {
@@ -105,8 +115,8 @@ func restartPolicy(exitCode int, spec *Config) bool {
 	return false
 }
 
-func tryStartProcess(spec *Config, tracker *UpdateTracker) (*exec.Cmd, chan error, error) {
-	cmd, err := startProcess(spec)
+func tryStartProcess(spec *Config, tracker *UpdateTracker) (*processHandle, chan error, error) {
+	handle, err := startProcess(spec)
 	if err != nil {
 		// Process start retry failed
 		tracker.Emit(FATAL, 0, -1)
@@ -117,47 +127,56 @@ func tryStartProcess(spec *Config, tracker *UpdateTracker) (*exec.Cmd, chan erro
 
 	go func(c *exec.Cmd) {
 		exitCh <- c.Wait()
-	}(cmd)
+	}(handle.cmd)
 
-	return cmd, exitCh, nil
+	return handle, exitCh, nil
 }
 
-func waitForStartup(processInfo *processInfo, name string, logger *Logger) (*exec.Cmd, chan error, int, bool) {
-	var cmd *exec.Cmd
+func waitForStartup(processInfo *processInfo, name string, logger *Logger) (*processHandle, chan error, int, bool) {
+	var handle *processHandle
 	var err error
 	var exitCh chan error
 	var pid int
 	started := false
 
-	for attempt := 0; attempt <= processInfo.spec.Startretries; attempt++ {
+	spec := processInfo.currentSpec()
+	if spec == nil {
+		return nil, nil, 0, false
+	}
+
+	for attempt := 0; attempt <= spec.Startretries; attempt++ {
 		// Emit starting status
 		processInfo.tracker.Emit(STARTING, 0, 0)
 
+		spec = processInfo.currentSpec()
+
 		// Attempt process start
-		cmd, exitCh, err = tryStartProcess(processInfo.spec, processInfo.tracker)
+		handle, exitCh, err = tryStartProcess(spec, processInfo.tracker)
+
 		if err != nil {
 			continue
 		}
 
-		pid = cmd.Process.Pid
+		processInfo.runtime.streams = handle.streams
+		pid = handle.cmd.Process.Pid
 		if logger != nil {
 			logger.LogMessage(LevelInfo, fmt.Sprintf("spawned: '%s' with pid %d", name, pid))
 		}
 
-		if processInfo.spec.Starttime <= 0 {
+		if spec.Starttime <= 0 {
 			processInfo.tracker.Emit(RUNNING, pid, 0)
 			started = true
 			break
 		}
 
 		// Validate process startup within window
-		startupWindow := time.Duration(processInfo.spec.Starttime) * time.Second
+		startupWindow := time.Duration(spec.Starttime) * time.Second
 		timer := time.NewTimer(startupWindow)
 
 		select {
-		case <-processInfo.ctx.Done():
+		case <-processInfo.runtime.ctx.Done():
 			// Context cancelled during startup validation
-			exitCode := stopProcess(cmd, processInfo.stopSignal, processInfo.stopTimeout, exitCh)
+			exitCode := stopProcess(handle.cmd, processInfo.stopSignal(), processInfo.stopTimeout(), exitCh)
 			processInfo.tracker.Emit(STOPPED, pid, exitCode)
 			timer.Stop()
 			return nil, nil, 0, false
@@ -167,7 +186,7 @@ func waitForStartup(processInfo *processInfo, name string, logger *Logger) (*exe
 			timer.Stop()
 			exitCode := getExitCode(err)
 			processInfo.tracker.Emit(FATAL, pid, exitCode)
-			if restartPolicy(exitCode, processInfo.spec) {
+			if restartPolicy(exitCode, processInfo.currentSpec()) {
 				processInfo.tracker.Emit(BACKOFF, pid, exitCode)
 				time.Sleep(DefaultBackoffDelay)
 				continue
@@ -188,19 +207,19 @@ func waitForStartup(processInfo *processInfo, name string, logger *Logger) (*exe
 	if !started {
 		// All startup retries exhausted
 		if logger != nil {
-			logger.LogMessage(LevelCritical, fmt.Sprintf("process '%s' failed to start after %d attempts", name, processInfo.spec.Startretries))
+			logger.LogMessage(LevelCritical, fmt.Sprintf("process '%s' failed to start after %d attempts", name, spec.Startretries))
 		}
 		return nil, nil, 0, false
 	}
 
-	return cmd, exitCh, pid, true
+	return handle, exitCh, pid, true
 }
 
 func monitorRuntime(processInfo *processInfo, cmd *exec.Cmd, exitCh chan error, pid int) LifecycleEvent {
 	select {
-	case <-processInfo.ctx.Done():
+	case <-processInfo.runtime.ctx.Done():
 		// Context cancelled during runtime
-		exitCode := stopProcess(cmd, processInfo.stopSignal, processInfo.stopTimeout, exitCh)
+		exitCode := stopProcess(cmd, processInfo.stopSignal(), processInfo.stopTimeout(), exitCh)
 		processInfo.tracker.Emit(STOPPED, pid, exitCode)
 		return LifecycleEvent{
 			Action:   ActionStop,
@@ -214,7 +233,7 @@ func monitorRuntime(processInfo *processInfo, cmd *exec.Cmd, exitCh chan error, 
 
 		processInfo.tracker.Emit(STOPPED, pid, exitCode)
 
-		if restartPolicy(exitCode, processInfo.spec) {
+		if restartPolicy(exitCode, processInfo.currentSpec()) {
 
 			processInfo.tracker.Emit(BACKOFF, pid, exitCode)
 
@@ -232,28 +251,29 @@ func monitorRuntime(processInfo *processInfo, cmd *exec.Cmd, exitCh chan error, 
 	}
 }
 
-func supervise(ctx context.Context, name string, spec *Config, tracker *UpdateTracker, logger *Logger) {
+func supervise(runtime *Runtime, name string, spec *atomic.Pointer[Config], tracker *UpdateTracker, logger *Logger) {
 
 	processInfo := &processInfo{
-		ctx:         ctx,
-		spec:        spec,
-		tracker:     tracker,
-		stopSignal:  getStopSignal(spec.Stopsignal),
-		stopTimeout: time.Duration(spec.Stoptime) * time.Second,
+		runtime: runtime,
+		spec:    spec,
+		tracker: tracker,
 	}
 
 	for {
-		cmd, exitCh, pid, ok := waitForStartup(processInfo, name, logger)
+		handle, exitCh, pid, ok := waitForStartup(processInfo, name, logger)
 		if !ok {
 			return
 		}
 
-		result := monitorRuntime(processInfo, cmd, exitCh, pid)
+		result := monitorRuntime(processInfo, handle.cmd, exitCh, pid)
 
 		switch result.Action {
 		case ActionStop:
 			return
 		case ActionRestart:
+			if logger != nil {
+				logger.LogMessage(LevelInfo, fmt.Sprintf("restarting: '%s'", name))
+			}
 			time.Sleep(DefaultBackoffDelay)
 		}
 	}

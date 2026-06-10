@@ -3,8 +3,11 @@ package internal
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -50,6 +53,17 @@ type running struct {
 	reply chan []RunningInstance
 }
 
+type attach struct {
+	name  string
+	conn  net.Conn
+	reply chan attachResult
+}
+
+type attachResult struct {
+	done <-chan struct{}
+	err  error
+}
+
 type load struct {
 	configs map[string]*Config
 	reply   chan error
@@ -78,7 +92,7 @@ type Manager struct {
 }
 
 type Instance struct {
-	spec    *Config
+	spec    atomic.Pointer[Config]
 	runtime *Runtime
 	state   ProcessInstance
 }
@@ -160,6 +174,10 @@ func isConfigChanged(prevConfig, newConfig *Config) bool {
 		}
 	}
 
+	if prevConfig.Stdout != newConfig.Stdout || prevConfig.Stderr != newConfig.Stderr {
+		return true
+	}
+
 	return false
 }
 
@@ -220,21 +238,52 @@ func (m *Manager) eventLoop() {
 			case running:
 				var running []RunningInstance
 				for name, inst := range instances {
+					spec := inst.spec.Load()
+					if spec == nil {
+						continue
+					}
 					if inst.state.Status == RUNNING {
 						running = append(running, RunningInstance{
 							Name:     name,
-							Priority: inst.spec.MemoryPriority,
+							Priority: spec.MemoryPriority,
 						})
 					}
 				}
 				c.reply <- running
+			case attach:
+				inst, exist := instances[c.name]
+				if !exist {
+					c.reply <- attachResult{err: fmt.Errorf("process %s not found in manager registry", c.name)}
+					break
+				}
+				if inst.runtime == nil || inst.state.Status != RUNNING {
+					c.reply <- attachResult{err: fmt.Errorf("process %s is not running", c.name)}
+					break
+				}
+				if err := inst.runtime.streams.stdout.Attach(c.conn); err != nil {
+					c.reply <- attachResult{err: err}
+					break
+				}
+				if err := inst.runtime.streams.stderr.Attach(c.conn); err != nil {
+					inst.runtime.streams.stdout.Detach(c.conn)
+					c.reply <- attachResult{err: err}
+					break
+				}
+				done := make(chan struct{})
+				rt := inst.runtime
+				go func() {
+					defer close(done)
+					_, _ = io.Copy(io.Discard, c.conn)
+					rt.streams.stdout.Detach(c.conn)
+					rt.streams.stderr.Detach(c.conn)
+				}()
+				c.reply <- attachResult{done: done}
 			case load:
 				var autostart []string
 				for name, spec := range c.configs {
-					instances[name] = &Instance{
-						spec:  spec,
-						state: ProcessInstance{Status: STOPPED},
-					}
+					inst := &Instance{state: ProcessInstance{Status: STOPPED}}
+					inst.spec.Store(spec)
+					instances[name] = inst
 					if spec.Autostart {
 						autostart = append(autostart, name)
 					}
@@ -250,7 +299,7 @@ func (m *Manager) eventLoop() {
 				var toStart []string
 
 				for _, name := range sequence.Update {
-					instances[name].spec = c.configs[name]
+					instances[name].spec.Store(c.configs[name])
 				}
 
 				for _, name := range sequence.Stop {
@@ -261,22 +310,24 @@ func (m *Manager) eventLoop() {
 				}
 
 				for _, name := range sequence.Restart {
-					inst := instances[name]
-					toStop = append(toStop, inst.runtime)
-					instances[name] = &Instance{
-						spec:  c.configs[name],
+					prevInst := instances[name]
+					toStop = append(toStop, prevInst.runtime)
+					currInst := &Instance{
 						state: ProcessInstance{Status: STOPPED},
 					}
-					if inst.runtime != nil {
+					currInst.spec.Store(c.configs[name])
+					instances[name] = currInst
+					if prevInst.runtime != nil {
 						toStart = append(toStart, name)
 					}
 				}
 
 				for _, name := range sequence.Start {
-					instances[name] = &Instance{
-						spec:  c.configs[name],
+					currInst := &Instance{
 						state: ProcessInstance{Status: STOPPED},
 					}
+					currInst.spec.Store(c.configs[name])
+					instances[name] = currInst
 
 					if c.configs[name].Autostart {
 						toStart = append(toStart, name)
@@ -326,7 +377,7 @@ func (m *Manager) initSupervise(name string, inst *Instance) {
 	tracker := &UpdateTracker{name: name, updates: m.updates}
 	logger := m.logger
 	go func() {
-		supervise(rt.ctx, name, inst.spec, tracker, logger)
+		supervise(rt, name, &inst.spec, tracker, logger)
 		select {
 		case m.cmd <- finished{name: name, runtime: rt}:
 		default:
@@ -378,6 +429,13 @@ func (m *Manager) Reload(newConfigs map[string]*Config) error {
 	reply := make(chan error, 1)
 	m.cmd <- reload{configs: newConfigs, reply: reply}
 	return <-reply
+}
+
+func (m *Manager) Attach(name string, conn net.Conn) (<-chan struct{}, error) {
+	reply := make(chan attachResult, 1)
+	m.cmd <- attach{name: name, conn: conn, reply: reply}
+	result := <-reply
+	return result.done, result.err
 }
 
 func (m *Manager) Shutdown() {

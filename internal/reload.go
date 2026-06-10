@@ -16,7 +16,7 @@ func Restarting(instances map[string]*Instance, configs map[string]*Config) Rest
 			sequence.Stop = append(sequence.Stop, name)
 			continue
 		}
-		if isConfigChanged(inst.spec, newConfig) {
+		if isConfigChanged(inst.spec.Load(), newConfig) {
 			sequence.Restart = append(sequence.Restart, name)
 			continue
 		}

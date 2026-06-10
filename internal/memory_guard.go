@@ -4,17 +4,20 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
 // RunMemoryGuard starts a background loop that monitors system memory usage.
-func RunMemoryGuard(ctx context.Context, cfg MemoryGuardConfig, mgr *Manager, logger *Logger) {
-	if !cfg.Enabled {
+// All config fields (enabled, threshold, interval) hot-update on reload.
+func RunMemoryGuard(ctx context.Context, cfg *atomic.Pointer[MemoryGuardConfig], mgr *Manager, logger *Logger) {
+	initial := cfg.Load()
+	if !initial.Enabled {
 		return
 	}
 
-	interval := time.Duration(cfg.Interval) * time.Second
-	ticker := time.NewTicker(interval)
+	activeInterval := time.Duration(initial.Interval) * time.Second
+	ticker := time.NewTicker(activeInterval)
 	defer ticker.Stop()
 
 	for {
@@ -22,6 +25,14 @@ func RunMemoryGuard(ctx context.Context, cfg MemoryGuardConfig, mgr *Manager, lo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			current := cfg.Load()
+			if !current.Enabled {
+				continue
+			}
+			if newInterval := time.Duration(current.Interval) * time.Second; newInterval != activeInterval {
+				activeInterval = newInterval
+				ticker.Reset(activeInterval)
+			}
 			usage, err := MemoryUsagePercent()
 			if err != nil {
 				if logger != nil {
@@ -29,7 +40,7 @@ func RunMemoryGuard(ctx context.Context, cfg MemoryGuardConfig, mgr *Manager, lo
 				}
 				continue
 			}
-			if usage >= cfg.Threshold {
+			if usage >= current.Threshold {
 				killLowestPriority(mgr, logger)
 			}
 		}

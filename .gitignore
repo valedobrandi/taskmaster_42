@@ -17,3 +17,4 @@ SUPERVISOR_FIX_PLAN.md
 .aider*
 eval_point4
 test_taskmaster/test_taskmaster
+sessionid.txt

@@ -5,17 +5,19 @@ import (
 )
 
 type Runtime struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	streams *streamRouter
 }
 
 func newRuntime(parentCtx context.Context) *Runtime {
 	ctx, cancel := context.WithCancel(parentCtx)
 	return &Runtime{
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		streams: newStreamRoute(),
 	}
 }
 

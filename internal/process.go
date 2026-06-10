@@ -2,12 +2,19 @@ package internal
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 )
+
+type processHandle struct {
+	cmd     *exec.Cmd
+	streams *streamRouter
+}
 
 func environment(extra map[string]string) []string {
 	env := slices.Clone(os.Environ())
@@ -46,33 +53,40 @@ func buildCommand(config *Config) *exec.Cmd {
 }
 
 func privileged(config *Config, cmd *exec.Cmd) {
-	if config.Uid == nil && config.Gid == nil {
+
+	uid := uint32(os.Geteuid())
+	gid := uint32(os.Getegid())
+
+	if config.Uid == nil {
+		config.Uid = &uid
+	}
+
+	if config.Gid == nil {
+		config.Gid = &gid
+	}
+
+	if gid == uint32(os.Getegid()) && uid == uint32(os.Geteuid()) {
 		return
 	}
 
-	// Linux rejects Credential changes for some unprivileged launches even when
-	// the requested identity matches the current process. In that case, keep the
-	// current identity and avoid an unnecessary EPERM on exec.
-	if config.Uid != nil && *config.Uid != uint32(os.Geteuid()) {
-		goto apply
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	if config.Gid != nil && *config.Gid != uint32(os.Getegid()) {
-		goto apply
-	}
-	return
 
-apply:
-	cred := &syscall.Credential{}
-	if config.Uid != nil {
-		cred.Uid = *config.Uid
+	cmd.SysProcAttr.Credential = &syscall.Credential{
+		Uid: *config.Uid,
+		Gid: *config.Gid,
 	}
-	if config.Gid != nil {
-		cred.Gid = *config.Gid
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 }
 
-func startProcess(config *Config) (*exec.Cmd, error) {
+func resolveOutputPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "/dev/null"
+	}
+	return path
+}
+
+func startProcess(config *Config) (*processHandle, error) {
 
 	cmd := buildCommand(config)
 
@@ -87,48 +101,73 @@ func startProcess(config *Config) (*exec.Cmd, error) {
 	cmd.Dir = config.Workingdir
 	cmd.Env = environment(config.Env)
 
-	var closers []func()
+	router := newStreamRoute()
+	var closers []io.Closer
 	fail := func() {
 		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
+			_ = closers[i].Close()
 		}
 	}
 
-	if config.Stdout != "" {
-		f, err := os.OpenFile(config.Stdout, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fail()
-			return nil, fmt.Errorf("open stdout %s: %w", config.Stdout, err)
-		}
-		cmd.Stdout = f
-		closers = append(closers, func() { _ = f.Close() })
-	}
-
-	if config.Stderr != "" {
-		f, err := os.OpenFile(config.Stderr, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fail()
-			return nil, fmt.Errorf("open stderr %s: %w", config.Stderr, err)
-		}
-		cmd.Stderr = f
-		closers = append(closers, func() { _ = f.Close() })
-	} else if cmd.Stdout != nil {
-		cmd.Stderr = cmd.Stdout
-	}
-
-	closeFiles := func() {
-		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
-		}
-	}
-
-	err := cmd.Start()
+	stdoutPath := resolveOutputPath(config.Stdout)
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		closeFiles()
+		fail()
+		return nil, fmt.Errorf("open stdout %s: %w", stdoutPath, err)
+	}
+	closers = append(closers, stdoutFile)
+
+	stderrPath := resolveOutputPath(config.Stderr)
+	stderrFile := stdoutFile
+	if stderrPath == stdoutPath {
+		// Reuse the same file descriptor when both streams share a target.
+	} else {
+		stderrFile, err = os.OpenFile(stderrPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			fail()
+			return nil, fmt.Errorf("open stderr %s: %w", stderrPath, err)
+		}
+		closers = append(closers, stderrFile)
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		fail()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		fail()
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		fail()
 		return nil, err
 	}
 
-	closeFiles()
+	if stderrFile == stdoutFile {
+		var closeShared sync.Once
+		go func() {
+			defer closeShared.Do(func() { _ = stdoutFile.Close() })
+			_, _ = io.Copy(router.stdoutWrite(stdoutFile), stdoutPipe)
+		}()
+		go func() {
+			defer closeShared.Do(func() { _ = stderrFile.Close() })
+			_, _ = io.Copy(router.stderrWrite(stderrFile), stderrPipe)
+		}()
+	} else {
+		go func() {
+			_, _ = io.Copy(router.stdoutWrite(stdoutFile), stdoutPipe)
+			_ = stdoutFile.Close()
+		}()
+		go func() {
+			_, _ = io.Copy(router.stderrWrite(stderrFile), stderrPipe)
+			_ = stderrFile.Close()
+		}()
+	}
 
-	return cmd, nil
+	return &processHandle{cmd: cmd, streams: router}, nil
 }

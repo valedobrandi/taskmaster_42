@@ -13,25 +13,24 @@ import (
 )
 
 type Config struct {
-	ProcessName   string            `yaml:"process_name"`
-	Program       string            `yaml:"program"`
-	Cmd           []string          `yaml:"cmd"`
-	Numprocs      int               `yaml:"numprocs"`
-	NumprocsStart int               `yaml:"numprocs_start"`
-	Umask         int               `yaml:"umask"`
-	Workingdir    string            `yaml:"workingdir"`
-	Autostart     bool              `yaml:"autostart"`
-	Autorestart   string            `yaml:"autorestart"`
-	Exitcodes     []int             `yaml:"exitcodes"`
-	Startretries  int               `yaml:"startretries"`
-	Starttime     int               `yaml:"starttime"`
-	Stopsignal    string            `yaml:"stopsignal"`
-	Stoptime      int               `yaml:"stoptime"`
-	Stdout        string            `yaml:"stdout"`
-	Stderr        string            `yaml:"stderr"`
-	Env           map[string]string `yaml:"env"`
-	Uid           *uint32           `yaml:"uid"`
-	Gid           *uint32           `yaml:"gid"`
+	ProcessName    string            `yaml:"process_name"`
+	Program        string            `yaml:"program"`
+	Cmd            []string          `yaml:"cmd"`
+	Numprocs       int               `yaml:"numprocs"`
+	Umask          int               `yaml:"umask"`
+	Workingdir     string            `yaml:"workingdir"`
+	Autostart      bool              `yaml:"autostart"`
+	Autorestart    string            `yaml:"autorestart"`
+	Exitcodes      []int             `yaml:"exitcodes"`
+	Startretries   int               `yaml:"startretries"`
+	Starttime      int               `yaml:"starttime"`
+	Stopsignal     string            `yaml:"stopsignal"`
+	Stoptime       int               `yaml:"stoptime"`
+	Stdout         string            `yaml:"stdout"`
+	Stderr         string            `yaml:"stderr"`
+	Env            map[string]string `yaml:"env"`
+	Uid            *uint32           `yaml:"uid"`
+	Gid            *uint32           `yaml:"gid"`
 	MemoryPriority string            `yaml:"memory_priority"`
 }
 
@@ -67,6 +66,21 @@ func validateOutputPath(kind, path string) error {
 	return nil
 }
 
+func (c *Config) ValidateRuntime() error {
+	euid := uint32(os.Geteuid())
+	egid := uint32(os.Getegid())
+
+	if c.Uid != nil && *c.Uid != euid {
+		return fmt.Errorf("uid %d does not match current effective uid %d", *c.Uid, euid)
+	}
+
+	if c.Gid != nil && *c.Gid != egid {
+		return fmt.Errorf("gid %d does not match current effective gid %d", *c.Gid, egid)
+	}
+
+	return nil
+}
+
 func (c *Config) Validate() error {
 	// Identity slice: mandatory fields
 	if c.Program == "" {
@@ -75,6 +89,10 @@ func (c *Config) Validate() error {
 
 	if len(c.Cmd) == 0 || strings.TrimSpace(c.Cmd[0]) == "" {
 		return fmt.Errorf("cmd must list at least one non-empty executable")
+	}
+
+	if err := c.ValidateRuntime(); err != nil {
+		return fmt.Errorf("runtime validation: %w", err)
 	}
 
 	if c.Numprocs < 1 {

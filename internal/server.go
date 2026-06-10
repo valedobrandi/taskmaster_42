@@ -6,7 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
-	"sync"
+	"sync/atomic"
 )
 
 type RPCRequest struct {
@@ -26,8 +26,7 @@ type Server struct {
 	mgr         *Manager
 	socketPath  string
 	configPath  string
-	memGuardCfg MemoryGuardConfig
-	cfgMu       sync.RWMutex
+	memGuardCfg atomic.Pointer[MemoryGuardConfig]
 	exitRoot    context.CancelFunc
 }
 
@@ -38,14 +37,17 @@ func NewServer(socketPath string, mgr *Manager, configPath string, memGuardCfg M
 		return nil, err
 	}
 
-	return &Server{listener: l, mgr: mgr, socketPath: socketPath, configPath: configPath, memGuardCfg: memGuardCfg, exitRoot: exitRoot}, nil
+	s := &Server{listener: l, mgr: mgr, socketPath: socketPath, configPath: configPath, exitRoot: exitRoot}
+	s.memGuardCfg.Store(&memGuardCfg)
+	return s, nil
 }
 
-// SetMemoryGuardConfig updates the server's memory guard configuration under lock.
 func (s *Server) SetMemoryGuardConfig(cfg MemoryGuardConfig) {
-	s.cfgMu.Lock()
-	s.memGuardCfg = cfg
-	s.cfgMu.Unlock()
+	s.memGuardCfg.Store(&cfg)
+}
+
+func (s *Server) MemoryGuardCfg() *atomic.Pointer[MemoryGuardConfig] {
+	return &s.memGuardCfg
 }
 
 func (s *Server) Serve() error {
@@ -75,6 +77,11 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
+	if req.Method == "attach" {
+		s.attach(conn, req)
+		return
+	}
+
 	resp, post := s.dispatch(req)
 
 	_ = json.NewEncoder(conn).Encode(&resp)
@@ -83,6 +90,25 @@ func (s *Server) handle(conn net.Conn) {
 		post()
 	}
 
+}
+
+func (s *Server) attach(conn net.Conn, req RPCRequest) {
+	var p struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = json.NewEncoder(conn).Encode(RPCResponse{ID: req.ID, Error: err.Error()})
+		return
+	}
+	done, err := s.mgr.Attach(p.Name, conn)
+	if err != nil {
+		_ = json.NewEncoder(conn).Encode(RPCResponse{ID: req.ID, Error: err.Error()})
+		return
+	}
+	if err := json.NewEncoder(conn).Encode(RPCResponse{ID: req.ID, Result: "ok"}); err != nil {
+		return
+	}
+	<-done
 }
 
 func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
@@ -125,9 +151,7 @@ func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
 		if err := s.mgr.Reload(cfg); err != nil {
 			resp.Error = err.Error()
 		} else {
-			s.cfgMu.Lock()
-			s.memGuardCfg = memGuard
-			s.cfgMu.Unlock()
+			s.memGuardCfg.Store(&memGuard)
 			resp.Result = "ok"
 		}
 
@@ -140,14 +164,13 @@ func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
 		}
 
 	case "memory_guard_status":
-		s.cfgMu.RLock()
-		cfg := s.memGuardCfg
-		s.cfgMu.RUnlock()
+		cfg := s.memGuardCfg.Load()
 		resp.Result = map[string]any{
 			"enabled":   cfg.Enabled,
 			"threshold": cfg.Threshold,
 			"interval":  cfg.Interval,
 		}
+
 
 	default:
 		resp.Error = "unknown method: " + req.Method

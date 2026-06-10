@@ -2,6 +2,7 @@ package internal
 
 import (
 	"fmt"
+	"log/syslog"
 	"os"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 type Logger struct {
 	file    *os.File
 	entries chan logEntry
+	syslog  *syslog.Writer
 }
 
 type LogLevel string
@@ -34,9 +36,12 @@ func NewLogger(logFile string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log file %s: %w", logFile, err)
 	}
+	writer, _ := syslog.New(syslog.LOG_DAEMON, "taskmaster")
+
 	return &Logger{
 		file:    f,
 		entries: make(chan logEntry, 100),
+		syslog:  writer,
 	}, nil
 }
 
@@ -50,6 +55,22 @@ func (l *Logger) Start() {
 			if _, err := l.file.WriteString(logLine); err != nil {
 				fmt.Fprintf(os.Stderr, "[logger] write error: %v\n", err)
 			}
+
+			if l.syslog != nil {
+				switch entry.level {
+				case LevelCritical:
+					_ = l.syslog.Crit(entry.message)
+				case LevelError:
+					_ = l.syslog.Err(entry.message)
+				case LevelWarn:
+					_ = l.syslog.Warning(entry.message)
+				case LevelDebug:
+					_ = l.syslog.Debug(entry.message)
+				default:
+					_ = l.syslog.Info(entry.message)
+				}
+			}
+
 		}
 	}()
 }
@@ -76,6 +97,9 @@ func (l *Logger) enqueue(level LogLevel, message string) {
 // Close closes the logger's file and updates channel.
 func (l *Logger) Close() error {
 	close(l.entries)
+	if l.syslog != nil {
+		_ = l.syslog.Close()
+	}
 	return l.file.Close()
 }
 

@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 type rpcResponse struct {
@@ -107,6 +110,36 @@ func main() {
 		}
 
 		json.NewEncoder(conn).Encode(req)
+
+		if method == "attach" {
+			var resp rpcResponse
+			dec := json.NewDecoder(conn)
+			if err := dec.Decode(&resp); err != nil {
+				conn.Close()
+				fmt.Println("error:", err)
+				continue
+			}
+			if resp.Error != "" {
+				conn.Close()
+				fmt.Printf("error: %s\n", normalizeError(resp.Error))
+				continue
+			}
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sigCh
+				_ = conn.Close()
+			}()
+
+			if buffered := dec.Buffered(); buffered != nil {
+				_, _ = io.Copy(os.Stdout, buffered)
+			}
+			_, _ = io.Copy(os.Stdout, conn)
+			signal.Stop(sigCh)
+			continue
+		}
+
 		var resp rpcResponse
 		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 			conn.Close()
