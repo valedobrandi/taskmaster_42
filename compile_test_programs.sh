@@ -1,0 +1,6 @@
+echo "Building testprograms..."
+go build -o "./testprograms/crasher/crasher" "./testprograms/crasher"
+go build -o "./testprograms/longrunner/longrunner" "./testprograms/longrunner"
+go build -o "./testprograms/slowstopper/slowstopper" "./testprograms/slowstopper"
+go build -o "./testprograms/envreporter/envreporter" "./testprograms/envreporter"
+echo "Done."
