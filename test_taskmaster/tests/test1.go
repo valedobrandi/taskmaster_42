@@ -66,6 +66,24 @@ func RunPoint1(ctx *helpers.TestContext, r *helpers.Report) {
 		r.Failf("1.4 status does NOT show dummy:00 as stopped")
 	}
 
+	out, err = helpers.RunCtlArgs(ctx, "start", "dummy:00")
+	if err == nil && strings.Contains(out, "started") {
+		_, _ = helpers.WaitForStatus(ctx, config.DefaultWaitTimeout, func(m map[string]helpers.ProcStatus) bool {
+			p, ok := m["dummy:00"]
+			return ok && p.State == "running"
+		})
+		r.Passf("1.4a argv start dummy:00 -> running")
+	} else {
+		r.Failf("1.4a argv start failed: %v | out: %q", err, out)
+	}
+
+	out, err = helpers.RunCtlArgs(ctx, "status")
+	if err == nil && strings.Contains(out, "dummy:00") && strings.Contains(out, "RUNNING") {
+		r.Passf("1.4b argv status shows dummy:00 as running")
+	} else {
+		r.Failf("1.4b argv status failed: %v | out: %q", err, out)
+	}
+
 	_, _ = helpers.RunCtl(ctx, "restart dummy:00")
 	_, err = helpers.WaitForStatus(ctx, config.RestartWaitTimeout, func(m map[string]helpers.ProcStatus) bool {
 		p, ok := m["dummy:00"]

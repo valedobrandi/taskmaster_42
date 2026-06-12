@@ -31,7 +31,7 @@ func run() int {
 		DaemonPath: filepath.Join(root, config.DaemonBin),
 		CtlPath:    filepath.Join(root, config.CtlBin),
 		LogPath:    filepath.Join(root, config.LogFile),
-		SocketPath: config.SocketPath,
+		SocketPath: filepath.Join(os.TempDir(), fmt.Sprintf("taskmaster-%d.sock", os.Getpid())),
 	}
 
 	p.Section("Building Binaries")

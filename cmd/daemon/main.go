@@ -10,6 +10,8 @@ import (
 	"taskmaster/internal"
 )
 
+const defaultSocketPath = "/tmp/taskmaster.sock"
+
 func startLogger() *internal.Logger {
 	logger, err := internal.NewLogger("taskmaster.log")
 	if err != nil {
@@ -23,6 +25,11 @@ func startLogger() *internal.Logger {
 
 func main() {
 	path := "config.yml"
+	socketPath := os.Getenv("TASKMASTER_SOCKET")
+	if socketPath == "" {
+		socketPath = defaultSocketPath
+	}
+
 	configMap, memGuardCfg, err := internal.LoadConfig(path)
 	if err != nil {
 		fmt.Println(err)
@@ -48,7 +55,7 @@ func main() {
 	control := internal.NewControlService(mgr, path, new(atomic.Pointer[internal.MemoryGuardConfig]), shutdown)
 	control.MemoryGuardCfg().Store(&memGuardCfg)
 
-	svr, err := internal.NewServer("/tmp/taskmaster.sock", control)
+	svr, err := internal.NewServer(socketPath, control)
 	if err != nil {
 		logger.LogMessage(internal.LevelError, fmt.Sprintf("failed to create server: %v", err))
 		shutdown()

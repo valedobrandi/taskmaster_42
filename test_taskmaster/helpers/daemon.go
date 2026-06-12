@@ -38,6 +38,7 @@ type TestContext struct {
 func StartDaemon(ctx *TestContext) error {
 	cmd := exec.Command(ctx.DaemonPath)
 	cmd.Dir = ctx.Root
+	cmd.Env = append(os.Environ(), "TASKMASTER_SOCKET="+ctx.SocketPath)
 
 	stdout, err := os.Create(filepath.Join(os.TempDir(), config.DaemonStdout))
 	if err != nil {
@@ -105,6 +106,19 @@ func RunCtl(ctx *TestContext, input string) (string, error) {
 	cmd := exec.Command(ctx.CtlPath)
 	cmd.Dir = ctx.Root
 	cmd.Stdin = strings.NewReader(input + "\n")
+	cmd.Env = append(os.Environ(), "TASKMASTER_SOCKET="+ctx.SocketPath)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return buf.String(), err
+}
+
+// RunCtlArgs invokes taskmasterctl directly with argv commands.
+func RunCtlArgs(ctx *TestContext, args ...string) (string, error) {
+	cmd := exec.Command(ctx.CtlPath, args...)
+	cmd.Dir = ctx.Root
+	cmd.Env = append(os.Environ(), "TASKMASTER_SOCKET="+ctx.SocketPath)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
