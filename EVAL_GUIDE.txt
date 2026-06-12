@@ -1,0 +1,403 @@
+================================================================================
+                        TASKMASTER — MANUAL EVALUATION GUIDE
+================================================================================
+Repo: bde-albu / taskmaster_42
+Date: 2026-06-12
+
+SETUP (do this first)
+--------------------------------------------------------------------------------
+  git clone <repo>
+  cd taskmaster_42
+  make build                  # builds taskmasterd, taskmasterctl, testprograms
+  ls taskmasterd taskmasterctl testprograms/*/
+
+  The daemon reads config.yml from the current directory.
+  A working config.yml is already present in the repo.
+
+================================================================================
+SECTION 1 — PRELIMINARIES
+================================================================================
+
+[ ] Author file present (login in it)
+[ ] No norm violations (norminette or equivalent for the chosen language)
+[ ] No forbidden libraries (only stdlib + YAML parser allowed for config;
+    client/server libs allowed for bonus only)
+[ ] No segfault or uncontrolled crash during any test below
+
+================================================================================
+SECTION 2 — BASIC TESTS
+================================================================================
+
+--- 2.1  CONTROL SHELL ---
+
+The ctl tool works in two modes:
+  Interactive REPL:     ./taskmasterctl
+  One-shot argv:        ./taskmasterctl status
+
+Start daemon in one terminal:
+  Terminal A:  ./taskmasterd
+
+Open ctl in a second terminal:
+  Terminal B:  ./taskmasterctl
+
+Available commands inside the REPL:
+  status              — list all processes with state, pid, uptime
+  start  <name>       — start a stopped process
+  stop   <name>       — stop a running process
+  restart <name>      — restart a running process
+  reload              — hot-reload config (same as SIGHUP)
+  shutdown            — stop daemon gracefully
+
+Expected output of "status":
+  dummy-0    RUNNING    pid 12345, uptime 5s
+  lazy       STOPPED    stopped
+  crasher    BACKOFF    ...
+  ...
+
+PASS if: start/stop/restart commands work and status reflects the change.
+
+--- 2.2  CONFIG FILE ---
+
+Config is loaded from config.yml at startup.
+Show the evaluator the relevant section of config.yml.
+Run "status" in the REPL — all autostart:true programs appear as RUNNING.
+
+  taskmaster> status
+
+Expected: dummy-0, dummy-1, dummy-2, ticker-0, ticker-1, longrunner,
+          slowstopper, envreporter, server, hello42 appear.
+
+PASS if: programs from config are loaded and their status is visible.
+
+--- 2.3  LOGGING ---
+
+The daemon writes to taskmaster.log in the working directory.
+
+  tail -f taskmaster.log
+
+Events to verify in the log:
+  - Program started:    look for "started" or "running" entries
+  - Program stopped:    stop a process, confirm log entry
+  - Unexpected exit:    crasher crashes → log entry appears
+  - Fatal (abort):      after startretries exhausted, "fatal" in log
+
+  taskmaster> stop longrunner
+  # check taskmaster.log for stop event
+
+  # crasher auto-crashes; watch log for restart attempts and fatal
+
+PASS if: start, stop, unexpected exit, and fatal abort events are all logged.
+
+--- 2.4  HOT-RELOAD ---
+
+Two ways to reload: SIGHUP signal OR "reload" command.
+
+Method A — shell command:
+  taskmaster> reload
+
+Method B — signal to daemon PID:
+  kill -HUP $(pgrep taskmasterd)
+
+HOW TO DEMONSTRATE:
+
+Step 1: Confirm lazy is STOPPED (autostart: false in config).
+  taskmaster> status     # lazy → STOPPED
+
+Step 2: Edit config.yml — change lazy.autostart to true.
+
+Step 3: Send reload.
+  taskmaster> reload
+
+Step 4: Check status immediately.
+  taskmaster> status     # lazy → RUNNING (or STARTING)
+
+Verify NON-AFFECTED processes did NOT restart (their PID must not change):
+  Before reload: note PID of dummy-0
+  After reload:  dummy-0 PID must be the same
+
+PASS if: changed programs update, unchanged programs keep the same PID.
+
+================================================================================
+SECTION 3 — CONFIG OPTIONS (show each in config.yml and demonstrate live)
+================================================================================
+
+--- 3.1  cmd — command to launch ---
+
+  dummy:
+    cmd: ["sleep", "999"]
+
+Show in config.yml. Run "status", confirm process is running.
+  ps aux | grep sleep
+
+--- 3.2  numprocs — number of instances ---
+
+  dummy:
+    numprocs: 3
+
+Run "status". Expect: dummy-0, dummy-1, dummy-2 all RUNNING.
+
+--- 3.3  autostart — start at daemon launch or not ---
+
+  dummy:  autostart: true   → starts immediately on daemon launch
+  lazy:   autostart: false  → stays STOPPED until manually started
+
+  taskmaster> status
+  # dummy-0 RUNNING, lazy STOPPED
+
+--- 3.4  autorestart — always / never / unexpected ---
+
+  ticker:   autorestart: always      → restarts regardless of exit code
+  dummy:    autorestart: unexpected  → restarts only if exit code NOT in exitcodes
+  lazy:     autorestart: never       → never restarts
+
+  Demonstrate "unexpected":
+    Stop dummy-0 from outside (kill its PID):
+      kill <dummy-0-pid>
+    status → dummy-0 should restart automatically (unexpected exit, not code 0)
+
+  Demonstrate "always":
+    ticker will restart even after a normal exit.
+
+  Demonstrate "never":
+    taskmaster> stop lazy
+    status → lazy stays STOPPED, never comes back on its own
+
+--- 3.5  exitcodes — what counts as "expected" exit ---
+
+  dummy:
+    exitcodes: [0]
+
+  A process exiting with code 0 is "expected". Exiting with anything else
+  is "unexpected" and triggers autorestart: unexpected.
+
+  Demonstrate with crasher (exits non-zero → triggers restart cycle):
+    status → crasher cycles through STARTING → BACKOFF → STARTING ...
+
+--- 3.6  starttime — seconds to wait before declaring "successfully started" ---
+
+  dummy:   starttime: 1   → after 1s alive it is RUNNING
+  server:  starttime: 5   → must survive 5s before RUNNING
+
+  Start a process and watch its state:
+    taskmaster> start lazy
+    # immediately: STARTING
+    # after starttime seconds: RUNNING
+
+--- 3.7  startretries — attempts before FATAL ---
+
+  dummy:    startretries: 0   → no retries; one failure → FATAL
+  longrunner: startretries: 3 → tries 3 times before FATAL
+
+  Demonstrate with a broken process (point cmd at a non-existent binary):
+    Edit config.yml, set cmd to ["/nonexistent"], startretries: 2
+    Reload config.
+    status → STARTING → BACKOFF → STARTING → BACKOFF → FATAL
+
+--- 3.8  stopsignal — signal to send for graceful stop ---
+
+  dummy:      stopsignal: TERM   → sends SIGTERM
+  longrunner: stopsignal: USR1   → sends SIGUSR1
+  slowstopper: stopsignal: USR1  → sends SIGUSR1
+
+  Demonstrate:
+    taskmaster> stop longrunner
+    # longrunner handles SIGUSR1 and exits cleanly
+    strace or log shows signal sent
+
+--- 3.9  stoptime — grace period before SIGKILL ---
+
+  slowstopper:
+    stopsignal: USR1
+    stoptime: 3
+
+  slowstopper is intentionally slow to stop. On stop command:
+  - USR1 is sent first
+  - After 3s, SIGKILL is sent if still alive
+
+  Demonstrate:
+    taskmaster> stop slowstopper
+    # wait 3 seconds → process killed
+    tail /tmp/slowstopper.stdout  # may show "received USR1" message
+
+--- 3.10  stdout / stderr — redirect to file or discard ---
+
+  dummy:
+    stdout: /tmp/dummy.stdout
+    stderr: /tmp/dummy.stderr
+
+  Demonstrate:
+    cat /tmp/ticker.stdout      # ticker output appears here
+    cat /tmp/envreporter.out    # envreporter output here
+
+--- 3.11  env — environment variables ---
+
+  envreporter:
+    env:
+      TM_FOO: hello
+      TM_BAR: "42"
+      TM_GREETING: "salut depuis taskmaster"
+
+  envreporter prints its environment on stdout.
+  Demonstrate:
+    taskmaster> start envreporter   (if not already running)
+    cat /tmp/envreporter.out
+    # TM_FOO=hello, TM_BAR=42, TM_GREETING=salut depuis taskmaster visible
+
+--- 3.12  workingdir — working directory ---
+
+  envreporter:
+    workingdir: /tmp
+
+  The process runs with /tmp as its cwd.
+  envreporter prints its cwd — confirm it shows /tmp.
+
+--- 3.13  umask ---
+
+  envreporter:
+    umask: 0o077
+
+  Files created by envreporter will have permissions masked by 077.
+  envreporter may print its umask — check /tmp/envreporter.out.
+  Or:  ls -la <file created by envreporter>  → permissions show 600 or similar.
+
+================================================================================
+SECTION 4 — STRESS TESTS
+================================================================================
+
+--- 4.1  Kill a supervised process; verify it restarts ---
+
+  Step 1: Confirm ticker-0 is RUNNING, note its PID.
+    taskmaster> status
+    # ticker-0   RUNNING   pid XXXX
+
+  Step 2: Kill it from outside:
+    kill XXXX
+
+  Step 3: Check status after a moment:
+    taskmaster> status
+    # ticker-0   RUNNING   pid YYYY  (new PID — restarted automatically)
+
+  ticker has autorestart: always, so it always comes back.
+
+--- 4.2  Supervise a process that always fails; verify it aborts after retries ---
+
+  crasher is configured with autorestart: always, startretries: 3, starttime: 5
+  It crashes after 1 second — well before starttime of 5s.
+
+  Watch it cycle:
+    taskmaster> status
+    # crasher   STARTING
+    # (after ~1s crash)
+    # crasher   BACKOFF
+    # ... (3 retries)
+    # crasher   FATAL
+
+  Also check taskmaster.log for retry and fatal events.
+
+================================================================================
+SECTION 5 — BONUS
+================================================================================
+
+--- BONUS 1: Privilege de-escalation (uid / gid) ---
+
+  server:
+    uid: 1000
+    gid: 1000
+
+  The daemon runs as root (or current user), but the server process
+  runs as uid/gid 1000.
+
+  Demonstrate:
+    ps aux | grep "sleep 999"
+    # shows the user column matching uid 1000
+
+  Score: 1 point
+
+--- BONUS 2: Client / Server architecture (daemon + ctl via socket) ---
+
+  Architecture:
+    taskmasterd  — background daemon, listens on Unix socket /tmp/taskmaster.sock
+    taskmasterctl — separate client binary, connects via the socket
+
+  Demonstrate:
+    ls -la /tmp/taskmaster.sock    # socket exists while daemon runs
+    ./taskmasterctl status         # works from a separate terminal/process
+
+  The ctl also works in one-shot mode:
+    ./taskmasterctl status
+    ./taskmasterctl start lazy
+    ./taskmasterctl stop lazy
+
+  Score: 1 point
+
+--- BONUS 3: Advanced logging / reporting ---
+
+  (Check if implemented — email, syslog, HTTP, etc.)
+  If only file logging is present this does not count as the bonus
+  (file logging is already required in mandatory section).
+
+  Score: 1 point if advanced reporting implemented
+
+--- BONUS 4: Attach (counts as 2 points) ---
+
+  Attach streams a supervised process's stdout directly to the terminal,
+  like screen / tmux attach.
+
+  Demonstrate:
+    Terminal A: ./taskmasterd
+    Terminal B: ./taskmasterctl attach ticker-0
+    # Terminal B now shows ticker-0's live output in real time
+    # Press Ctrl+C to detach
+
+  Score: 2 points
+
+================================================================================
+SCORING SUMMARY
+================================================================================
+
+Mandatory (Yes/No each):
+  [ ] Control shell
+  [ ] Config file loading
+  [ ] Logging
+  [ ] Hot-reload (SIGHUP + shell command)
+  [ ] cmd option
+  [ ] numprocs option
+  [ ] autostart option
+  [ ] autorestart option (always/never/unexpected)
+  [ ] exitcodes option
+  [ ] starttime option
+  [ ] startretries option
+  [ ] stopsignal option
+  [ ] stoptime option
+  [ ] stdout/stderr option
+  [ ] env option
+  [ ] workingdir option
+  [ ] umask option
+  [ ] Stress test: process killed → restarts
+  [ ] Stress test: always-failing → fatal after retries
+
+Bonus (0–5 points total):
+  [ ] uid/gid privilege drop             (+1)
+  [ ] daemon + socket client/server      (+1)
+  [ ] advanced logging (not just file)   (+1)
+  [ ] attach to process output           (+2)
+
+================================================================================
+QUICK REFERENCE — COMMANDS
+================================================================================
+
+  make build                         # build everything
+  ./taskmasterd                      # start daemon (reads config.yml)
+  ./taskmasterctl                    # interactive REPL
+  ./taskmasterctl status             # one-shot status
+  ./taskmasterctl start  <name>      # start process
+  ./taskmasterctl stop   <name>      # stop process
+  ./taskmasterctl restart <name>     # restart process
+  ./taskmasterctl reload             # hot-reload config
+  ./taskmasterctl shutdown           # stop daemon
+  ./taskmasterctl attach  <name>     # stream process output (bonus)
+  kill -HUP $(pgrep taskmasterd)     # SIGHUP reload (alternative)
+  tail -f taskmaster.log             # watch log events live
+  cat /tmp/<name>.stdout             # read program stdout
+
+================================================================================
