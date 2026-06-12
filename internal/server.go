@@ -1,12 +1,10 @@
 package internal
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
 	"os"
-	"sync/atomic"
 )
 
 type RPCRequest struct {
@@ -22,32 +20,19 @@ type RPCResponse struct {
 }
 
 type Server struct {
-	listener    net.Listener
-	mgr         *Manager
-	socketPath  string
-	configPath  string
-	memGuardCfg atomic.Pointer[MemoryGuardConfig]
-	exitRoot    context.CancelFunc
+	listener   net.Listener
+	control    *ControlService
+	socketPath string
 }
 
-func NewServer(socketPath string, mgr *Manager, configPath string, memGuardCfg MemoryGuardConfig, exitRoot context.CancelFunc) (*Server, error) {
+func NewServer(socketPath string, control *ControlService) (*Server, error) {
 	_ = os.Remove(socketPath)
 	l, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, err
 	}
 
-	s := &Server{listener: l, mgr: mgr, socketPath: socketPath, configPath: configPath, exitRoot: exitRoot}
-	s.memGuardCfg.Store(&memGuardCfg)
-	return s, nil
-}
-
-func (s *Server) SetMemoryGuardConfig(cfg MemoryGuardConfig) {
-	s.memGuardCfg.Store(&cfg)
-}
-
-func (s *Server) MemoryGuardCfg() *atomic.Pointer[MemoryGuardConfig] {
-	return &s.memGuardCfg
+	return &Server{listener: l, control: control, socketPath: socketPath}, nil
 }
 
 func (s *Server) Serve() error {
@@ -91,7 +76,6 @@ func (s *Server) handle(conn net.Conn) {
 	}
 
 }
-
 func (s *Server) attach(conn net.Conn, req RPCRequest) {
 	var p struct {
 		Name string `json:"name"`
@@ -100,7 +84,7 @@ func (s *Server) attach(conn net.Conn, req RPCRequest) {
 		_ = json.NewEncoder(conn).Encode(RPCResponse{ID: req.ID, Error: err.Error()})
 		return
 	}
-	done, err := s.mgr.Attach(p.Name, conn)
+	done, err := s.control.Attach(p.Name, conn)
 	if err != nil {
 		_ = json.NewEncoder(conn).Encode(RPCResponse{ID: req.ID, Error: err.Error()})
 		return
@@ -117,7 +101,7 @@ func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
 
 	switch req.Method {
 	case "status":
-		resp.Result = s.mgr.Status()
+		resp.Result = s.control.Status()
 
 	case "start", "stop", "restart":
 		var p struct {
@@ -130,11 +114,11 @@ func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
 		var err error
 		switch req.Method {
 		case "start":
-			err = s.mgr.Start(p.Name)
+			err = s.control.Start(p.Name)
 		case "stop":
-			err = s.mgr.Stop(p.Name)
+			err = s.control.Stop(p.Name)
 		case "restart":
-			err = s.mgr.Restart(p.Name)
+			err = s.control.Restart(p.Name)
 		}
 		if err != nil {
 			resp.Error = err.Error()
@@ -143,34 +127,18 @@ func (s *Server) dispatch(req RPCRequest) (RPCResponse, func()) {
 		}
 
 	case "reload":
-		cfg, memGuard, err := LoadConfig(s.configPath)
-		if err != nil {
-			resp.Error = err.Error()
-			break
-		}
-		if err := s.mgr.Reload(cfg); err != nil {
+		if err := s.control.Reload(); err != nil {
 			resp.Error = err.Error()
 		} else {
-			s.memGuardCfg.Store(&memGuard)
 			resp.Result = "ok"
 		}
 
 	case "shutdown":
 		resp.Result = "ok"
-		return resp, func() {
-			if s.exitRoot != nil {
-				s.exitRoot()
-			}
-		}
+		return resp, s.control.Shutdown
 
 	case "memory_guard_status":
-		cfg := s.memGuardCfg.Load()
-		resp.Result = map[string]any{
-			"enabled":   cfg.Enabled,
-			"threshold": cfg.Threshold,
-			"interval":  cfg.Interval,
-		}
-
+		resp.Result = s.control.MemoryGuardStatus()
 
 	default:
 		resp.Error = "unknown method: " + req.Method

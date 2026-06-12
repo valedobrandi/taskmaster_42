@@ -28,21 +28,12 @@ func Exit(logger *Logger, mgr *Manager, shutdownFunc context.CancelFunc, message
 }
 
 func HotWire(
-	path string,
-	mgr *Manager,
-	svr *Server,
+	control *ControlService,
 	logger *Logger,
 ) error {
-	configMap, memGuardCfg, err := LoadConfig(path)
-	if err != nil {
+	if err := control.Reload(); err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
-
-	if err := mgr.Reload(configMap); err != nil {
-		return fmt.Errorf("failed to reload manager: %w", err)
-	}
-
-	svr.SetMemoryGuardConfig(memGuardCfg)
 
 	logger.LogMessage(LevelInfo, "received reload signal (SIGHUP), reloading config")
 

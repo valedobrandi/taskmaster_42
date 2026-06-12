@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"taskmaster/internal"
 )
@@ -44,14 +45,17 @@ func main() {
 		return
 	}
 
-	svr, err := internal.NewServer("/tmp/taskmaster.sock", mgr, path, memGuardCfg, shutdown)
+	control := internal.NewControlService(mgr, path, new(atomic.Pointer[internal.MemoryGuardConfig]), shutdown)
+	control.MemoryGuardCfg().Store(&memGuardCfg)
+
+	svr, err := internal.NewServer("/tmp/taskmaster.sock", control)
 	if err != nil {
 		logger.LogMessage(internal.LevelError, fmt.Sprintf("failed to create server: %v", err))
 		shutdown()
 		return
 	}
 
-	go internal.RunMemoryGuard(ctx, svr.MemoryGuardCfg(), mgr, logger)
+	go internal.RunMemoryGuard(ctx, control.MemoryGuardCfg(), mgr, logger)
 
 	go func() {
 		if err := svr.Serve(); err != nil {
@@ -75,7 +79,7 @@ func main() {
 				internal.Exit(logger, mgr, shutdown, fmt.Sprintf("received shutdown signal (%s), exiting", sig))
 				return
 			case syscall.SIGHUP:
-				if err := internal.HotWire(path, mgr, svr, logger); err != nil {
+				if err := internal.HotWire(control, logger); err != nil {
 					logger.LogMessage(internal.LevelError, fmt.Sprintf("config reload failed: %v", err))
 				}
 			}

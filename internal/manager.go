@@ -94,6 +94,7 @@ type Manager struct {
 type Instance struct {
 	spec    atomic.Pointer[Config]
 	runtime *Runtime
+	epoch   uint64
 	state   ProcessInstance
 }
 
@@ -189,6 +190,9 @@ func (m *Manager) eventLoop() {
 
 		case update := <-m.updates:
 			if inst, exists := instances[update.Name]; exists {
+				if update.Epoch != inst.epoch {
+					break
+				}
 				inst.state.Status = update.Status
 				inst.state.Pid = update.Pid
 				inst.state.ExitCode = update.ExitCode
@@ -372,9 +376,10 @@ func stopWaitRuntime(rt *Runtime) {
 func (m *Manager) initSupervise(name string, inst *Instance) {
 	rt := newRuntime(m.ctx)
 	inst.runtime = rt
+	inst.epoch++
 
 	m.wait.Add(1)
-	tracker := &UpdateTracker{name: name, updates: m.updates}
+	tracker := &UpdateTracker{name: name, epoch: inst.epoch, updates: m.updates}
 	logger := m.logger
 	go func() {
 		supervise(rt, name, &inst.spec, tracker, logger)

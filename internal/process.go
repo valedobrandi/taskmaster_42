@@ -53,16 +53,14 @@ func buildCommand(config *Config) *exec.Cmd {
 }
 
 func privileged(config *Config, cmd *exec.Cmd) {
-
 	uid := uint32(os.Geteuid())
-	gid := uint32(os.Getegid())
-
-	if config.Uid == nil {
-		config.Uid = &uid
+	if config.Uid != nil {
+		uid = *config.Uid
 	}
 
-	if config.Gid == nil {
-		config.Gid = &gid
+	gid := uint32(os.Getegid())
+	if config.Gid != nil {
+		gid = *config.Gid
 	}
 
 	if gid == uint32(os.Getegid()) && uid == uint32(os.Geteuid()) {
@@ -74,8 +72,8 @@ func privileged(config *Config, cmd *exec.Cmd) {
 	}
 
 	cmd.SysProcAttr.Credential = &syscall.Credential{
-		Uid: *config.Uid,
-		Gid: *config.Gid,
+		Uid: uid,
+		Gid: gid,
 	}
 }
 

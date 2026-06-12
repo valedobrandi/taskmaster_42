@@ -34,6 +34,7 @@ const (
 
 type ProcessUpdate struct {
 	Name      string
+	Epoch     uint64
 	Status    Status
 	Pid       int
 	ExitCode  int
@@ -42,6 +43,7 @@ type ProcessUpdate struct {
 
 type UpdateTracker struct {
 	name    string
+	epoch   uint64
 	updates chan<- ProcessUpdate
 }
 
@@ -66,6 +68,7 @@ func (p *processInfo) stopTimeout() time.Duration {
 func (t *UpdateTracker) Emit(status Status, pid int, exitCode int) {
 	update := ProcessUpdate{
 		Name:      t.name,
+		Epoch:     t.epoch,
 		Status:    status,
 		Pid:       pid,
 		ExitCode:  exitCode,

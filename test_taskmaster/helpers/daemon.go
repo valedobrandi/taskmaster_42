@@ -69,6 +69,7 @@ func StopDaemon(ctx *TestContext) {
 	}
 	// Fallback: kill any stray daemon processes.
 	exec.Command("pkill", "-f", config.DaemonBin).Run()
+	waitForDaemonExit(ctx.SocketPath, 5*time.Second)
 }
 
 // WaitForCtlReady polls until taskmasterctl responds successfully.
@@ -109,6 +110,22 @@ func RunCtl(ctx *TestContext, input string) (string, error) {
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+func waitForDaemonExit(socketPath string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !daemonProcessExists() {
+			_ = os.Remove(socketPath)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = os.Remove(socketPath)
+}
+
+func daemonProcessExists() bool {
+	return exec.Command("pgrep", "-f", config.DaemonBin).Run() == nil
 }
 
 // ParseStatus converts raw "status" output into a map keyed by process name.
